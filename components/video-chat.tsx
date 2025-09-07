@@ -20,11 +20,25 @@ import {
   Monitor,
   MonitorOff,
   Play,
+  Users,
+  Activity,
+  Play as Relay,
 } from "lucide-react"
 import { AudioVisualizer } from "@/components/audio-visualizer"
 import { VolumeControl } from "@/components/volume-control"
 import { VideoControls } from "@/components/video-controls"
 import { ResizablePanel } from "@/components/resizable-panel"
+import { ChatPanel } from "@/components/chat-panel"
+import { FileSharePanel } from "@/components/file-share-panel"
+import { SpeechToText } from "@/components/speech-to-text"
+import { TranslationPanel } from "@/components/translation-panel"
+import { PeerDiscoveryPanel } from "@/components/peer-discovery-panel"
+import { SystemDiagnosticsPanel } from "@/components/system-diagnostics-panel"
+import { RelayStatusPanel } from "@/components/relay-status-panel"
+import { HybridP2PManager } from "@/lib/hybrid-p2p-manager"
+import { WebRTCManager } from "@/lib/webrtc"
+import SocketManager from "@/lib/socket"
+import { P2POptimizer, type NetworkQuality, type OptimizationSettings } from "@/lib/p2p-optimizer"
 
 interface VideoChatProps {
   roomId: string
@@ -39,10 +53,11 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [showChat, setShowChat] = useState(false)
   const [showFileShare, setShowFileShare] = useState(false)
+  const [showPeerDiscovery, setShowPeerDiscovery] = useState(false)
   const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(false)
   const [isTranslationEnabled, setIsTranslationEnabled] = useState(false)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map())
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
   const [volume, setVolume] = useState(50)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -65,56 +80,89 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       speaker: string
     }>
   >([])
+  const [hybridP2P, setHybridP2P] = useState<HybridP2PManager | null>(null)
+  const [webrtcManager, setWebrtcManager] = useState<WebRTCManager | null>(null)
+  const [connectedPeers, setConnectedPeers] = useState<string[]>([])
+  const [discoveredPeers, setDiscoveredPeers] = useState<any[]>([])
+  const [networkStatus, setNetworkStatus] = useState<any>({})
+  const [relayEnabled, setRelayEnabled] = useState(false)
+  const [p2pOptimizer, setP2POptimizer] = useState<P2POptimizer | null>(null)
+  const [networkQuality, setNetworkQuality] = useState<NetworkQuality>({
+    latency: 0,
+    bandwidth: 0,
+    packetLoss: 0,
+    jitter: 0,
+    score: 0,
+  })
+  const [optimizationSettings, setOptimizationSettings] = useState<OptimizationSettings>({
+    videoQuality: "auto",
+    audioQuality: "auto",
+    adaptiveBitrate: true,
+    relayPreference: "auto",
+    connectionTimeout: 10000,
+    maxRetries: 3,
+  })
+  const [relayMetrics, setRelayMetrics] = useState<any>({
+    totalConnections: 0,
+    activeRelays: 0,
+    bandwidthUsed: 0,
+    averageLatency: 0,
+    successRate: 0,
+  })
+  const [showDiagnostics, setShowDiagnostics] = useState(false)
+  const [showRelayStatus, setShowRelayStatus] = useState(false)
 
   const localVideoRef = useRef<HTMLVideoElement>(null)
-  const remoteVideoRef = useRef<HTMLVideoElement>(null)
+  const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
   const containerRef = useRef<HTMLDivElement>(null)
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const isMountedRef = useRef(true)
   const abortControllerRef = useRef<AbortController>(new AbortController())
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
 
-  // Complete manual video control without autoPlay
-  const setVideoStream = useCallback((videoElement: HTMLVideoElement | null, stream: MediaStream | null, isLocal = false) => {
-    if (!videoElement || !isMountedRef.current) return
+  const setVideoStream = useCallback(
+    (videoElement: HTMLVideoElement | null, stream: MediaStream | null, isLocal = false) => {
+      if (!videoElement || !isMountedRef.current) return
 
-    try {
-      // Stop any existing playback immediately
-      videoElement.pause()
-      videoElement.srcObject = null
-      
-      if (stream) {
-        videoElement.srcObject = stream
-        videoElement.muted = isLocal // Local video is always muted to prevent feedback
-        
-        // Update playing state
-        if (isLocal) {
-          setLocalVideoPlaying(false)
-        } else {
-          setRemoteVideoPlaying(false)
+      try {
+        videoElement.pause()
+        videoElement.srcObject = null
+
+        if (stream) {
+          videoElement.srcObject = stream
+          videoElement.muted = isLocal
+
+          if (isLocal) {
+            setLocalVideoPlaying(false)
+          } else {
+            setRemoteVideoPlaying(false)
+          }
         }
+      } catch (error) {
+        console.error("[v0] Error setting video stream:", error)
       }
-    } catch (error) {
-      console.error("[v0] Error setting video stream:", error)
-    }
-  }, [])
+    },
+    [],
+  )
 
-  // Manual play function that requires user interaction
-  const playVideo = useCallback(async (videoElement: HTMLVideoElement | null, isLocal = false) => {
-    if (!videoElement || !isMountedRef.current || !userInteracted) return
+  const playVideo = useCallback(
+    async (videoElement: HTMLVideoElement | null, isLocal = false) => {
+      if (!videoElement || !isMountedRef.current || !userInteracted) return
 
-    try {
-      if (videoElement.paused && videoElement.srcObject) {
-        await videoElement.play()
-        if (isLocal) {
-          setLocalVideoPlaying(true)
-        } else {
-          setRemoteVideoPlaying(true)
+      try {
+        if (videoElement.paused && videoElement.srcObject) {
+          await videoElement.play()
+          if (isLocal) {
+            setLocalVideoPlaying(true)
+          } else {
+            setRemoteVideoPlaying(true)
+          }
         }
+      } catch (error) {
+        console.log("[v0] Video play requires user interaction:", error)
       }
-    } catch (error) {
-      console.log("[v0] Video play requires user interaction:", error)
-    }
-  }, [userInteracted])
+    },
+    [userInteracted],
+  )
 
   const initializePeerConnection = useCallback(() => {
     const configuration: RTCConfiguration = {
@@ -137,8 +185,9 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
     peerConnection.ontrack = (event) => {
       const [remoteStream] = event.streams
-      setRemoteStream(remoteStream)
-      setVideoStream(remoteVideoRef.current, remoteStream, false)
+      setRemoteStreams((prev) => new Map(prev.set(event.track.id, remoteStream)))
+      remoteVideoRefs.current.set(event.track.id, document.createElement("video"))
+      setVideoStream(remoteVideoRefs.current.get(event.track.id), remoteStream, false)
     }
 
     return peerConnection
@@ -148,24 +197,45 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
     isMountedRef.current = true
     abortControllerRef.current = new AbortController()
 
-    const initializeCall = async () => {
+    const initializeP2PSystem = async () => {
       if (!isMountedRef.current) return
 
       try {
-        const peerConnection = initializePeerConnection()
+        console.log("[v0] Initializing hybrid P2P system")
+
+        const p2pManager = new HybridP2PManager()
+        await p2pManager.initialize(roomId, userId, nickname)
+        setHybridP2P(p2pManager)
+
+        const optimizer = new P2POptimizer()
+        setP2POptimizer(optimizer)
+
+        optimizer.setOnQualityChange((quality) => {
+          setNetworkQuality(quality)
+        })
+
+        optimizer.setOnSettingsChange((settings) => {
+          setOptimizationSettings(settings)
+        })
+
+        const socketManager = SocketManager.getInstance()
+        const socket = socketManager.connect()
+
+        const webrtc = new WebRTCManager(socket, userId)
+        setWebrtcManager(webrtc)
+
+        webrtc.setOnRemoteStream((peerId: string, stream: MediaStream) => {
+          console.log("[v0] Received remote stream from:", peerId)
+          setRemoteStreams((prev) => new Map(prev.set(peerId, stream)))
+          setConnectedPeers((prev) => [...prev.filter((id) => id !== peerId), peerId])
+        })
+
+        const videoConstraints = optimizer.getOptimalVideoConstraints()
+        const audioConstraints = optimizer.getOptimalAudioConstraints()
 
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 },
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: 48000,
-          },
+          video: videoConstraints,
+          audio: audioConstraints,
         })
 
         if (!isMountedRef.current) {
@@ -175,19 +245,41 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
         setLocalStream(stream)
         setVideoStream(localVideoRef.current, stream, true)
+        webrtc.setLocalStream(stream)
 
-        stream.getTracks().forEach((track) => {
-          peerConnection.addTrack(track, stream)
-        })
+        socket.emit("join-room", { roomId, userId, nickname })
+
+        const statusInterval = setInterval(() => {
+          if (p2pManager && isMountedRef.current) {
+            const status = p2pManager.getNetworkStatus()
+            setNetworkStatus(status)
+            setDiscoveredPeers(p2pManager.getDiscoveredPeers())
+
+            const relayMetrics = p2pManager.getRelayMetrics()
+            if (relayMetrics) {
+              setRelayMetrics(relayMetrics)
+            }
+
+            if (status.libp2pConnected || status.socketConnected) {
+              setConnectionStatus("connected")
+            } else {
+              setConnectionStatus("connecting")
+            }
+          }
+        }, 2000)
+
+        return () => {
+          clearInterval(statusInterval)
+        }
       } catch (error) {
-        console.error("Error accessing media devices:", error)
+        console.error("Error initializing P2P system:", error)
         if (isMountedRef.current) {
           setConnectionStatus("disconnected")
         }
       }
     }
 
-    initializeCall()
+    initializeP2PSystem()
 
     return () => {
       isMountedRef.current = false
@@ -197,10 +289,11 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         localVideoRef.current.pause()
         localVideoRef.current.srcObject = null
       }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.pause()
-        remoteVideoRef.current.srcObject = null
-      }
+
+      remoteVideoRefs.current.forEach((video) => {
+        video.pause()
+        video.srcObject = null
+      })
 
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop())
@@ -208,25 +301,42 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       if (screenStream) {
         screenStream.getTracks().forEach((track) => track.stop())
       }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close()
+
+      if (hybridP2P) {
+        hybridP2P.stop()
+      }
+
+      if (p2pOptimizer) {
+        p2pOptimizer.stopQualityMonitoring()
       }
     }
-  }, [initializePeerConnection, setVideoStream])
+  }, [roomId, userId, nickname])
 
-  // Handle user interaction to enable video playback
+  const toggleRelay = useCallback(async () => {
+    if (hybridP2P) {
+      try {
+        await hybridP2P.enableRelay()
+        setRelayEnabled(!relayEnabled)
+        console.log("[v0] Relay functionality toggled:", !relayEnabled)
+      } catch (error) {
+        console.error("[v0] Failed to toggle relay:", error)
+      }
+    }
+  }, [hybridP2P, relayEnabled])
+
   const handleUserInteraction = useCallback(() => {
     if (!userInteracted) {
       setUserInteracted(true)
-      // Auto-play videos after user interaction
       if (localVideoRef.current && localStream) {
         playVideo(localVideoRef.current, true)
       }
-      if (remoteVideoRef.current && remoteStream) {
-        playVideo(remoteVideoRef.current, false)
-      }
+      Array.from(remoteVideoRefs.current.values()).forEach((video) => {
+        if (video && video.srcObject) {
+          playVideo(video, false)
+        }
+      })
     }
-  }, [userInteracted, localStream, remoteStream, playVideo])
+  }, [userInteracted, localStream])
 
   const toggleVideo = useCallback(() => {
     handleUserInteraction()
@@ -273,11 +383,11 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         setScreenStream(screenShareStream)
         setIsScreenSharing(true)
 
-        if (peerConnectionRef.current && localStream) {
+        if (webrtcManager && localStream) {
           const videoTrack = localStream.getVideoTracks()[0]
           const screenTrack = screenShareStream.getVideoTracks()[0]
 
-          const sender = peerConnectionRef.current.getSenders().find((s) => s.track && s.track.kind === "video")
+          const sender = webrtcManager.getSenders().find((s) => s.track && s.track.kind === "video")
 
           if (sender && screenTrack) {
             await sender.replaceTrack(screenTrack)
@@ -316,9 +426,9 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         playVideo(localVideoRef.current, true)
       }
 
-      if (peerConnectionRef.current && localStream) {
+      if (webrtcManager && localStream) {
         const videoTrack = localStream.getVideoTracks()[0]
-        const sender = peerConnectionRef.current.getSenders().find((s) => s.track && s.track.kind === "video")
+        const sender = webrtcManager.getSenders().find((s) => s.track && s.track.kind === "video")
 
         if (sender && videoTrack) {
           await sender.replaceTrack(videoTrack)
@@ -340,10 +450,11 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
   const togglePictureInPicture = useCallback(async () => {
     handleUserInteraction()
-    if (remoteVideoRef.current && isMountedRef.current) {
+    if (remoteVideoRefs.current.size > 0 && isMountedRef.current) {
       try {
+        const firstRemoteVideo = remoteVideoRefs.current.values().next().value
         if (!document.pictureInPictureElement) {
-          await remoteVideoRef.current.requestPictureInPicture()
+          await firstRemoteVideo.requestPictureInPicture()
           setIsPiPEnabled(true)
         } else {
           await document.exitPictureInPicture()
@@ -357,9 +468,11 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
   const handleVolumeChange = useCallback((newVolume: number) => {
     setVolume(newVolume)
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.volume = newVolume / 100
-    }
+    remoteVideoRefs.current.forEach((video) => {
+      if (video) {
+        video.volume = newVolume / 100
+      }
+    })
   }, [])
 
   const handleTranscript = useCallback(
@@ -421,13 +534,30 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
   return (
     <div ref={containerRef} className="min-h-screen bg-background flex flex-col" onClick={handleUserInteraction}>
-      {/* Header */}
       <div className="bg-card border-b border-border p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div>
               <h1 className="text-lg font-semibold">Room: {roomId}</h1>
               <p className="text-sm text-muted-foreground">Connected as {nickname}</p>
+              <div className="flex items-center gap-2 mt-1">
+                <Badge variant="outline" className="text-xs">
+                  {networkStatus.libp2pConnected ? "P2P" : "Socket"} • {connectedPeers.length} peers
+                </Badge>
+                {networkStatus.localPeerId && (
+                  <Badge variant="secondary" className="text-xs font-mono">
+                    {networkStatus.localPeerId.slice(0, 8)}...
+                  </Badge>
+                )}
+                <Badge
+                  variant={
+                    networkQuality.score > 80 ? "default" : networkQuality.score > 50 ? "secondary" : "destructive"
+                  }
+                  className="text-xs"
+                >
+                  Quality: {networkQuality.score.toFixed(0)}%
+                </Badge>
+              </div>
             </div>
             <Badge
               variant={
@@ -465,6 +595,33 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
             <Button
               variant="outline"
               size="sm"
+              onClick={() => setShowPeerDiscovery(!showPeerDiscovery)}
+              className={showPeerDiscovery ? "bg-accent text-accent-foreground" : ""}
+            >
+              <Users className="w-4 h-4 mr-2" />
+              Peers
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowDiagnostics(!showDiagnostics)}
+              className={showDiagnostics ? "bg-accent text-accent-foreground" : ""}
+            >
+              <Activity className="w-4 h-4 mr-2" />
+              Diagnostics
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowRelayStatus(!showRelayStatus)}
+              className={showRelayStatus ? "bg-accent text-accent-foreground" : ""}
+            >
+              <Relay className="w-4 h-4 mr-2" />
+              Relay
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => setShowSubtitles(!showSubtitles)}
               className={showSubtitles ? "bg-accent text-accent-foreground" : ""}
             >
@@ -484,98 +641,75 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         </div>
       </div>
 
-      {/* Main Content */}
       <div className="flex-1 flex relative">
-        {/* Video Area */}
         <div className="flex-1 p-4">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-full">
-            {/* Remote Video */}
-            <ResizablePanel
-              defaultWidth={640}
-              defaultHeight={480}
-              minWidth={320}
-              minHeight={240}
-              className="video-container relative group"
-            >
-              <div className="relative h-full">
-                {remoteStream ? (
-                  <div className="relative h-full">
-                    <video
-                      ref={remoteVideoRef}
-                      className="video-element"
-                      playsInline
-                      muted={false}
-                      onVolumeChange={(e) => setAudioOutputLevel(e.currentTarget.volume * 100)}
-                    />
-                    {!remoteVideoPlaying && userInteracted && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                        <Button
-                          variant="outline"
-                          size="lg"
-                          onClick={() => playVideo(remoteVideoRef.current, false)}
-                          className="bg-white/90 hover:bg-white"
-                        >
-                          <Play className="w-6 h-6 mr-2" />
-                          Play Video
-                        </Button>
-                      </div>
-                    )}
-                    {!userInteracted && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                        <div className="text-center text-white">
-                          <Play className="w-12 h-12 mx-auto mb-2" />
-                          <p>Click anywhere to enable video playback</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-center h-full bg-muted">
-                    <div className="text-center">
-                      <Video className="w-16 h-16 text-muted-foreground mx-auto mb-2" />
-                      <p className="text-muted-foreground">Waiting for participant...</p>
-                      <Badge variant="secondary" className="mt-2">
-                        {connectionStatus}
-                      </Badge>
-                    </div>
-                  </div>
-                )}
+            {Array.from(remoteStreams.entries()).map(([peerId, stream]) => (
+              <ResizablePanel
+                key={peerId}
+                defaultWidth={640}
+                defaultHeight={480}
+                minWidth={320}
+                minHeight={240}
+                className="video-container relative group"
+              >
+                <div className="relative h-full">
+                  <video
+                    ref={(el) => {
+                      if (el) {
+                        remoteVideoRefs.current.set(peerId, el)
+                        setVideoStream(el, stream, false)
+                      }
+                    }}
+                    className="video-element"
+                    playsInline
+                    muted={false}
+                    onVolumeChange={(e) => setAudioOutputLevel(e.currentTarget.volume * 100)}
+                  />
 
-                <VideoControls
-                  isVisible={!!remoteStream}
-                  onFullscreen={toggleFullscreen}
-                  onPictureInPicture={togglePictureInPicture}
-                  isFullscreen={isFullscreen}
-                  isPiPEnabled={isPiPEnabled}
-                  className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity"
-                />
+                  <div className="absolute top-4 left-4">
+                    <Badge variant="default" className="bg-black/50 text-white">
+                      Peer: {peerId.slice(0, 8)}...
+                    </Badge>
+                  </div>
 
-                {remoteStream && (
+                  <VideoControls
+                    isVisible={true}
+                    onFullscreen={toggleFullscreen}
+                    onPictureInPicture={togglePictureInPicture}
+                    isFullscreen={isFullscreen}
+                    isPiPEnabled={isPiPEnabled}
+                    className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity"
+                  />
+
                   <div className="absolute bottom-4 left-4 right-4">
-                    <AudioVisualizer stream={remoteStream} isEnabled={true} />
+                    <AudioVisualizer stream={stream} isEnabled={true} />
                   </div>
-                )}
+                </div>
+              </ResizablePanel>
+            ))}
 
-                {(isSubtitlesEnabled || isTranslationEnabled) && remoteStream && (
-                  <div className="absolute bottom-16 left-4 right-4 space-y-2">
-                    {currentTranscript && (
-                      <div className="bg-black/80 text-white p-3 rounded-lg text-center">
-                        <div className="text-sm opacity-75 mb-1">Original:</div>
-                        <div>{currentTranscript}</div>
-                        {currentTranslation && isTranslationEnabled && (
-                          <>
-                            <div className="text-sm opacity-75 mt-2 mb-1">Translation:</div>
-                            <div className="text-accent-foreground">{currentTranslation}</div>
-                          </>
-                        )}
-                      </div>
-                    )}
+            {remoteStreams.size === 0 && (
+              <ResizablePanel
+                defaultWidth={640}
+                defaultHeight={480}
+                minWidth={320}
+                minHeight={240}
+                className="video-container relative group"
+              >
+                <div className="flex items-center justify-center h-full bg-muted">
+                  <div className="text-center">
+                    <Video className="w-16 h-16 text-muted-foreground mx-auto mb-2" />
+                    <p className="text-muted-foreground">Waiting for participants...</p>
+                    <Badge variant="secondary" className="mt-2">
+                      {connectionStatus}
+                    </Badge>
+                    <div className="mt-2 text-sm text-muted-foreground">{discoveredPeers.length} peers discovered</div>
                   </div>
-                )}
-              </div>
-            </ResizablePanel>
+                </div>
+              </ResizablePanel>
+            )}
 
-            {/* Local Video */}
             <ResizablePanel
               defaultWidth={640}
               defaultHeight={480}
@@ -626,7 +760,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
             </ResizablePanel>
           </div>
 
-          {/* Enhanced Control Bar */}
           <div className="mt-4 flex justify-center">
             <Card className="p-4">
               <div className="flex items-center gap-4">
@@ -680,7 +813,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
                   variant="outline"
                   size="icon"
                   onClick={togglePictureInPicture}
-                  disabled={!remoteStream}
+                  disabled={remoteStreams.size === 0}
                   className={isPiPEnabled ? "control-button active" : "control-button inactive bg-transparent"}
                 >
                   <PictureInPicture className="w-5 h-5" />
@@ -717,7 +850,106 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
           </div>
         </div>
 
-        {/* Side Panels */}
+        {showDiagnostics && (
+          <div className="w-96 border-l border-border">
+            <SystemDiagnosticsPanel
+              networkQuality={networkQuality}
+              optimizationSettings={optimizationSettings}
+              relayMetrics={relayMetrics}
+              onRunDiagnostics={() => {
+                if (p2pOptimizer && hybridP2P) {
+                  // Run comprehensive diagnostics
+                  console.log("[v0] Running system diagnostics")
+                }
+              }}
+              onOptimizeSettings={() => {
+                if (p2pOptimizer) {
+                  // Auto-optimize settings based on current conditions
+                  console.log("[v0] Auto-optimizing settings")
+                }
+              }}
+              onUpdateSettings={(newSettings) => {
+                if (p2pOptimizer) {
+                  p2pOptimizer.updateSettings(newSettings)
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {showRelayStatus && (
+          <div className="w-80 border-l border-border">
+            <RelayStatusPanel
+              metrics={relayMetrics}
+              connections={hybridP2P?.getActiveRelayConnections() || []}
+              isEnabled={relayEnabled}
+              onToggleRelay={toggleRelay}
+              onOptimizeRelay={() => {
+                console.log("[v0] Optimizing relay connections")
+              }}
+            />
+          </div>
+        )}
+
         {showChat && (
           <div className="w-80 border-l border-border">
-            <Chat\
+            <ChatPanel
+              roomId={roomId}
+              userId={userId}
+              nickname={nickname}
+              onSendMessage={(message) => {
+                if (hybridP2P) {
+                  hybridP2P.sendMessage({ type: "chat", content: message })
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {showFileShare && (
+          <div className="w-80 border-l border-border">
+            <FileSharePanel
+              roomId={roomId}
+              userId={userId}
+              nickname={nickname}
+              onShareFile={(fileData) => {
+                if (hybridP2P) {
+                  hybridP2P.sendMessage({ type: "file", content: fileData })
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {showPeerDiscovery && (
+          <div className="w-80 border-l border-border">
+            <PeerDiscoveryPanel
+              peers={discoveredPeers}
+              connectedPeers={discoveredPeers.filter((p) => p.isConnected)}
+              localPeerId={networkStatus.localPeerId}
+              localMultiaddrs={networkStatus.localMultiaddrs || []}
+              relayEnabled={relayEnabled}
+              onToggleRelay={toggleRelay}
+            />
+          </div>
+        )}
+
+        {showSubtitles && (
+          <div className="w-80 border-l border-border">
+            <SpeechToText isEnabled={isSubtitlesEnabled} onTranscript={handleTranscript} stream={localStream} />
+          </div>
+        )}
+
+        {showTranslation && (
+          <div className="w-80 border-l border-border">
+            <TranslationPanel
+              isEnabled={isTranslationEnabled}
+              transcript={currentTranscript}
+              onTranslation={handleTranslation}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
