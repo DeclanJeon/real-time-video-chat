@@ -1,30 +1,32 @@
 "use client"
 
-import { useState } from "react"
+import { useState, Suspense } from "react"
+import { useRouter } from "next/navigation"
 import { RoomSetup } from "@/components/room-setup"
-import { VideoChat } from "@/components/video-chat"
 import { v4 as uuidv4 } from "uuid"
 
+function RoomSetupFallback() {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+        <p className="text-muted-foreground">Loading room setup...</p>
+      </div>
+    </div>
+  )
+}
+
 export default function Home() {
-  const [isInRoom, setIsInRoom] = useState(false)
-  const [roomId, setRoomId] = useState("")
+  const router = useRouter()
   const [userId] = useState(() => uuidv4())
-  const [nickname, setNickname] = useState("")
 
   const handleJoinRoom = (roomId: string, nickname: string) => {
-    setRoomId(roomId)
-    setNickname(nickname)
-    setIsInRoom(true)
+    router.push(`/room/${roomId}?nickname=${encodeURIComponent(nickname)}`)
   }
 
-  const handleLeaveRoom = () => {
-    setIsInRoom(false)
-    setRoomId("")
-  }
-
-  if (!isInRoom) {
-    return <RoomSetup onJoinRoom={handleJoinRoom} userId={userId} />
-  }
-
-  return <VideoChat roomId={roomId} userId={userId} nickname={nickname} onLeaveRoom={handleLeaveRoom} />
+  return (
+    <Suspense fallback={<RoomSetupFallback />}>
+      <RoomSetup onJoinRoom={handleJoinRoom} userId={userId} />
+    </Suspense>
+  )
 }
