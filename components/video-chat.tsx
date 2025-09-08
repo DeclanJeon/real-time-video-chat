@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import io, { Socket } from "socket.io-client"
+import Peer from "simple-peer"
 import {
   Mic,
   MicOff,
@@ -25,6 +27,7 @@ import { AudioVisualizer } from "@/components/audio-visualizer"
 import { VolumeControl } from "@/components/volume-control"
 import { VideoControls } from "@/components/video-controls"
 import { ResizablePanel } from "@/components/resizable-panel"
+import { ChatPanel } from "@/components/chat-panel"
 
 interface VideoChatProps {
   roomId: string
@@ -33,7 +36,23 @@ interface VideoChatProps {
   onLeaveRoom: () => void
 }
 
+interface RoomUser {
+  userId: string
+  nickname: string
+  socketId: string
+}
+
+// ICE servers configuration
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun4.l.google.com:19302" }
+]
+
 export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatProps) {
+  // State management
   const [isVideoEnabled, setIsVideoEnabled] = useState(true)
   const [isAudioEnabled, setIsAudioEnabled] = useState(true)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
@@ -47,7 +66,8 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
   const [volume, setVolume] = useState(50)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isPiPEnabled, setIsPiPEnabled] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
+  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected" | "failed">("connecting")
+  const [connectionError, setConnectionError] = useState<string | null>(null)
   const [audioInputLevel, setAudioInputLevel] = useState(0)
   const [audioOutputLevel, setAudioOutputLevel] = useState(0)
   const [showSubtitles, setShowSubtitles] = useState(false)
@@ -55,9 +75,9 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
   const [currentTranscript, setCurrentTranscript] = useState("")
   const [currentTranslation, setCurrentTranslation] = useState("")
   const [localVideoPlaying, setLocalVideoPlaying] = useState(false)
-  const [remoteVideoPlaying, setRemoteVideoPlaying] = useState(false)
+ const [remoteVideoPlaying, setRemoteVideoPlaying] = useState(false)
   const [userInteracted, setUserInteracted] = useState(false)
-  const [subtitleHistory, setSubtitleHistory] = useState<
+ const [subtitleHistory, setSubtitleHistory] = useState<
     Array<{
       text: string
       translation?: string
@@ -65,171 +85,343 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       speaker: string
     }>
   >([])
-
+  
+  // Refs
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
+  const peerRef = useRef<Peer.Instance | null>(null)
+  const socketRef = useRef<Socket | null>(null)
   const isMountedRef = useRef(true)
   const abortControllerRef = useRef<AbortController>(new AbortController())
+  const localStreamRef = useRef<MediaStream | null>(null)
+  const targetSocketIdRef = useRef<string | null>(null)
+  const mySocketIdRef = useRef<string | undefined>(undefined)
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const iceCandidatesQueue = useRef<RTCIceCandidateInit[]>([])
 
-  // Complete manual video control without autoPlay
-  const setVideoStream = useCallback((videoElement: HTMLVideoElement | null, stream: MediaStream | null, isLocal = false) => {
-    if (!videoElement || !isMountedRef.current) return
+  // Cleanup function
+  const cleanup = useCallback(() => {
+    console.log("Cleaning up resources...")
+    
+    // Clear timeouts
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+    }
 
+    // Destroy peer connection
+    if (peerRef.current) {
+      try {
+        peerRef.current.destroy()
+      } catch (e) {
+        console.error("Error destroying peer:", e)
+      }
+      peerRef.current = null
+    }
+
+    // Stop local stream tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        track.stop()
+      })
+      localStreamRef.current = null
+    }
+
+    // Clear video elements
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null
+    }
+
+    // Disconnect socket
+    if (socketRef.current) {
+      socketRef.current.disconnect()
+      socketRef.current = null
+    }
+
+    setLocalStream(null)
+    setRemoteStream(null)
+    setConnectionStatus("disconnected")
+  }, [])
+
+  // Initialize media stream with error recovery
+  const initializeMediaStream = useCallback(async (): Promise<MediaStream | null> => {
     try {
-      // Stop any existing playback immediately
-      videoElement.pause()
-      videoElement.srcObject = null
-      
-      if (stream) {
-        videoElement.srcObject = stream
-        videoElement.muted = isLocal // Local video is always muted to prevent feedback
-        
-        // Update playing state
-        if (isLocal) {
-          setLocalVideoPlaying(false)
-        } else {
-          setRemoteVideoPlaying(false)
+      const constraints: MediaStreamConstraints = {
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 }
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000
         }
       }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      localStreamRef.current = stream
+      setLocalStream(stream)
+      
+      // Set video element
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream
+      }
+
+      return stream
     } catch (error) {
-      console.error("[v0] Error setting video stream:", error)
+      console.error("Error accessing media devices:", error)
+      setConnectionError("Failed to access camera/microphone")
+      
+      // Try audio-only fallback
+      try {
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+        localStreamRef.current = audioStream
+        setLocalStream(audioStream)
+        setIsVideoEnabled(false)
+        return audioStream
+      } catch (audioError) {
+        console.error("Failed to get audio stream:", audioError)
+        setConnectionError("Failed to access any media devices")
+        return null
+      }
     }
   }, [])
 
-  // Manual play function that requires user interaction
-  const playVideo = useCallback(async (videoElement: HTMLVideoElement | null, isLocal = false) => {
-    if (!videoElement || !isMountedRef.current || !userInteracted) return
+  // Create peer connection with proper error handling
+  const createPeerConnection = useCallback((initiator: boolean, targetSocketId: string): Peer.Instance | null => {
+    if (!localStreamRef.current) {
+      console.error("No local stream available")
+      return null
+    }
 
     try {
-      if (videoElement.paused && videoElement.srcObject) {
-        await videoElement.play()
-        if (isLocal) {
-          setLocalVideoPlaying(true)
-        } else {
-          setRemoteVideoPlaying(true)
+      const peer = new Peer({
+        initiator,
+        trickle: true,
+        stream: localStreamRef.current,
+        config: {
+          iceServers: ICE_SERVERS,
+          iceCandidatePoolSize: 10
         }
-      }
-    } catch (error) {
-      console.log("[v0] Video play requires user interaction:", error)
-    }
-  }, [userInteracted])
+      })
 
-  const initializePeerConnection = useCallback(() => {
-    const configuration: RTCConfiguration = {
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }],
-    }
+      // Handle signaling
+      peer.on('signal', (data: Peer.SignalData) => {
+        if (!socketRef.current) return
 
-    const peerConnection = new RTCPeerConnection(configuration)
-    peerConnectionRef.current = peerConnection
+        if (data.type === 'offer') {
+          socketRef.current.emit('offer', {
+            targetSocketId,
+            offer: data
+          })
+        } else if (data.type === 'answer') {
+          socketRef.current.emit('answer', {
+            targetSocketId,
+            answer: data
+          })
+        } else if (data.type === 'candidate' && data.candidate) {
+          socketRef.current.emit('ice-candidate', {
+            targetSocketId,
+            candidate: data.candidate
+          })
+        }
+      })
 
-    peerConnection.oniceconnectionstatechange = () => {
-      const state = peerConnection.iceConnectionState
-      if (state === "connected" || state === "completed") {
+      // Handle incoming stream
+      peer.on('stream', (stream: MediaStream) => {
+        console.log('Received remote stream')
+        setRemoteStream(stream)
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = stream
+        }
+      })
+
+      // Connection established
+      peer.on('connect', () => {
+        console.log('Peer connection established')
         setConnectionStatus("connected")
-      } else if (state === "disconnected" || state === "failed") {
+        setConnectionError(null)
+        
+        // Process queued ICE candidates
+        while (iceCandidatesQueue.current.length > 0) {
+          const candidate = iceCandidatesQueue.current.shift()
+          if (candidate) {
+            peer.signal({ type: 'candidate', candidate } as any)
+          }
+        }
+      })
+
+      // Handle errors
+      peer.on('error', (err: Error) => {
+        console.error('Peer error:', err)
+        setConnectionError(err.message)
+        setConnectionStatus("failed")
+        
+        // Attempt reconnection
+        reconnectTimeoutRef.current = setTimeout(() => {
+          console.log("Attempting to reconnect...")
+          initializeConnection()
+        }, 3000)
+      })
+
+      // Connection closed
+      peer.on('close', () => {
+        console.log('Peer connection closed')
         setConnectionStatus("disconnected")
-      } else {
-        setConnectionStatus("connecting")
+        setRemoteStream(null)
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = null
+        }
+      })
+
+      return peer
+    } catch (error) {
+      console.error("Error creating peer connection:", error)
+      setConnectionError("Failed to create peer connection")
+      return null
+    }
+  }, [])
+
+  // Initialize connection
+  const initializeConnection = useCallback(() => {
+    if (!socketRef.current) {
+      console.error("Socket not connected")
+      return
+    }
+
+    socketRef.current.emit('get-room-users', roomId, (users: RoomUser[]) => {
+      const otherUsers = users.filter(u => u.socketId !== socketRef.current?.id)
+      
+      if (otherUsers.length === 0) {
+        console.log("Waiting for other user...")
+        return
       }
-    }
 
-    peerConnection.ontrack = (event) => {
-      const [remoteStream] = event.streams
-      setRemoteStream(remoteStream)
-      setVideoStream(remoteVideoRef.current, remoteStream, false)
-    }
+      const targetUser = otherUsers[0]
+      
+      // Clean up existing peer if any
+      if (peerRef.current) {
+        peerRef.current.destroy()
+      }
 
-    return peerConnection
-  }, [setVideoStream])
+      // Create new peer connection
+      peerRef.current = createPeerConnection(true, targetUser.socketId)
+    })
+  }, [roomId, createPeerConnection])
 
+  // Main initialization effect
   useEffect(() => {
     isMountedRef.current = true
-    abortControllerRef.current = new AbortController()
+    let mounted = true
 
-    const initializeCall = async () => {
-      if (!isMountedRef.current) return
+    const init = async () => {
+      // Get media stream first
+      const stream = await initializeMediaStream()
+      if (!stream || !mounted) return
 
-      try {
-        const peerConnection = initializePeerConnection()
+      // Connect to signaling server
+      const socket = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || 'http://localhost:3001', {
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
+      })
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 },
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: 48000,
-          },
-        })
+      socketRef.current = socket
 
-        if (!isMountedRef.current) {
-          stream.getTracks().forEach((track) => track.stop())
-          return
+      // Socket event handlers
+      socket.on('connect', () => {
+        console.log('Connected to signaling server')
+        mySocketIdRef.current = socket.id
+        socket.emit('join-room', { roomId, userId, nickname })
+      })
+
+      socket.on('existing-users', (users: RoomUser[]) => {
+        console.log('Existing users:', users)
+        if (mounted) {
+          setTimeout(initializeConnection, 500)
+        }
+      })
+
+      socket.on('user-joined', (data: any) => {
+        console.log('User joined:', data)
+        if (mounted && !peerRef.current) {
+          setTimeout(initializeConnection, 500)
+        }
+      })
+
+      socket.on('offer', (data: { senderSocketId: string; offer: Peer.SignalData }) => {
+        if (!mounted) return
+        
+        console.log('Received offer')
+        
+        // Clean up existing peer
+        if (peerRef.current) {
+          peerRef.current.destroy()
         }
 
-        setLocalStream(stream)
-        setVideoStream(localVideoRef.current, stream, true)
-
-        stream.getTracks().forEach((track) => {
-          peerConnection.addTrack(track, stream)
-        })
-      } catch (error) {
-        console.error("Error accessing media devices:", error)
-        if (isMountedRef.current) {
-          setConnectionStatus("disconnected")
+        // Create answer peer
+        peerRef.current = createPeerConnection(false, data.senderSocketId)
+        if (peerRef.current) {
+          peerRef.current.signal(data.offer)
         }
-      }
+      })
+
+      socket.on('answer', (data: { senderSocketId: string; answer: Peer.SignalData }) => {
+        if (!mounted || !peerRef.current) return
+        
+        console.log('Received answer')
+        peerRef.current.signal(data.answer)
+      })
+
+      socket.on('ice-candidate', (data: { senderSocketId: string; candidate: RTCIceCandidateInit }) => {
+        if (!mounted) return
+        
+        if (peerRef.current) {
+          peerRef.current.signal({ type: 'candidate', candidate: data.candidate } as any)
+        } else {
+          // Queue ICE candidates if peer not ready
+          iceCandidatesQueue.current.push(data.candidate)
+        }
+      })
+
+      socket.on('user-left', (data: any) => {
+        console.log('User left:', data)
+        if (peerRef.current) {
+          peerRef.current.destroy()
+          peerRef.current = null
+        }
+        setRemoteStream(null)
+        setConnectionStatus("disconnected")
+      })
+
+      socket.on('disconnect', () => {
+        console.log('Disconnected from signaling server')
+        setConnectionStatus("disconnected")
+      })
+
+      socket.on('reconnect', () => {
+        console.log('Reconnected to signaling server')
+        socket.emit('join-room', { roomId, userId, nickname })
+      })
     }
 
-    initializeCall()
+    init()
 
     return () => {
+      mounted = false
       isMountedRef.current = false
-      abortControllerRef.current.abort()
-
-      if (localVideoRef.current) {
-        localVideoRef.current.pause()
-        localVideoRef.current.srcObject = null
-      }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.pause()
-        remoteVideoRef.current.srcObject = null
-      }
-
-      if (localStream) {
-        localStream.getTracks().forEach((track) => track.stop())
-      }
-      if (screenStream) {
-        screenStream.getTracks().forEach((track) => track.stop())
-      }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close()
-      }
+      cleanup()
     }
-  }, [initializePeerConnection, setVideoStream])
+  }, [roomId, userId, nickname, initializeMediaStream, createPeerConnection, initializeConnection, cleanup])
 
-  // Handle user interaction to enable video playback
-  const handleUserInteraction = useCallback(() => {
-    if (!userInteracted) {
-      setUserInteracted(true)
-      // Auto-play videos after user interaction
-      if (localVideoRef.current && localStream) {
-        playVideo(localVideoRef.current, true)
-      }
-      if (remoteVideoRef.current && remoteStream) {
-        playVideo(remoteVideoRef.current, false)
-      }
-    }
-  }, [userInteracted, localStream, remoteStream, playVideo])
-
+  // Toggle video
   const toggleVideo = useCallback(() => {
-    handleUserInteraction()
     if (localStream) {
       const videoTrack = localStream.getVideoTracks()[0]
       if (videoTrack) {
@@ -237,10 +429,10 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         setIsVideoEnabled(!isVideoEnabled)
       }
     }
-  }, [localStream, isVideoEnabled, handleUserInteraction])
+  }, [localStream, isVideoEnabled])
 
+  // Toggle audio
   const toggleAudio = useCallback(() => {
-    handleUserInteraction()
     if (localStream) {
       const audioTrack = localStream.getAudioTracks()[0]
       if (audioTrack) {
@@ -248,186 +440,35 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         setIsAudioEnabled(!isAudioEnabled)
       }
     }
-  }, [localStream, isAudioEnabled, handleUserInteraction])
+  }, [localStream, isAudioEnabled])
 
-  const toggleScreenShare = useCallback(async () => {
-    handleUserInteraction()
-    if (!isMountedRef.current) return
-
-    if (!isScreenSharing) {
-      try {
-        const screenShareStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 30 },
-          },
-          audio: true,
-        })
-
-        if (!isMountedRef.current) {
-          screenShareStream.getTracks().forEach((track) => track.stop())
-          return
-        }
-
-        setScreenStream(screenShareStream)
-        setIsScreenSharing(true)
-
-        if (peerConnectionRef.current && localStream) {
-          const videoTrack = localStream.getVideoTracks()[0]
-          const screenTrack = screenShareStream.getVideoTracks()[0]
-
-          const sender = peerConnectionRef.current.getSenders().find((s) => s.track && s.track.kind === "video")
-
-          if (sender && screenTrack) {
-            await sender.replaceTrack(screenTrack)
-          }
-
-          screenTrack.onended = () => {
-            if (!isMountedRef.current) return
-            setIsScreenSharing(false)
-            setScreenStream(null)
-            if (sender && videoTrack) {
-              sender.replaceTrack(videoTrack)
-            }
-            setVideoStream(localVideoRef.current, localStream, true)
-            if (userInteracted) {
-              playVideo(localVideoRef.current, true)
-            }
-          }
-        }
-
-        setVideoStream(localVideoRef.current, screenShareStream, true)
-        if (userInteracted) {
-          playVideo(localVideoRef.current, true)
-        }
-      } catch (error) {
-        console.error("Error sharing screen:", error)
-      }
-    } else {
-      if (screenStream) {
-        screenStream.getTracks().forEach((track) => track.stop())
-        setScreenStream(null)
-      }
-      setIsScreenSharing(false)
-
-      setVideoStream(localVideoRef.current, localStream, true)
-      if (userInteracted) {
-        playVideo(localVideoRef.current, true)
-      }
-
-      if (peerConnectionRef.current && localStream) {
-        const videoTrack = localStream.getVideoTracks()[0]
-        const sender = peerConnectionRef.current.getSenders().find((s) => s.track && s.track.kind === "video")
-
-        if (sender && videoTrack) {
-          await sender.replaceTrack(videoTrack)
-        }
-      }
+  // Leave room
+  const handleLeaveRoom = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.emit('leave-room', { roomId })
     }
-  }, [isScreenSharing, screenStream, localStream, setVideoStream, playVideo, userInteracted, handleUserInteraction])
-
-  const toggleFullscreen = useCallback(() => {
-    handleUserInteraction()
-    if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen()
-      setIsFullscreen(true)
-    } else {
-      document.exitFullscreen()
-      setIsFullscreen(false)
-    }
-  }, [handleUserInteraction])
-
-  const togglePictureInPicture = useCallback(async () => {
-    handleUserInteraction()
-    if (remoteVideoRef.current && isMountedRef.current) {
-      try {
-        if (!document.pictureInPictureElement) {
-          await remoteVideoRef.current.requestPictureInPicture()
-          setIsPiPEnabled(true)
-        } else {
-          await document.exitPictureInPicture()
-          setIsPiPEnabled(false)
-        }
-      } catch (error) {
-        console.error("Picture-in-picture error:", error)
-      }
-    }
-  }, [handleUserInteraction])
-
-  const handleVolumeChange = useCallback((newVolume: number) => {
-    setVolume(newVolume)
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.volume = newVolume / 100
-    }
-  }, [])
-
-  const handleTranscript = useCallback(
-    (text: string, language: string) => {
-      setCurrentTranscript(text)
-      const newEntry = {
-        text,
-        timestamp: new Date(),
-        speaker: nickname,
-      }
-      setSubtitleHistory((prev) => [newEntry, ...prev.slice(0, 49)])
-    },
-    [nickname],
-  )
-
-  const handleTranslation = useCallback((original: string, translated: string, fromLang: string, toLang: string) => {
-    setCurrentTranslation(translated)
-    setSubtitleHistory((prev) => {
-      const updated = [...prev]
-      if (updated[0] && updated[0].text === original) {
-        updated[0].translation = translated
-      }
-      return updated
-    })
-  }, [])
-
-  const toggleSubtitles = useCallback(() => {
-    setIsSubtitlesEnabled(!isSubtitlesEnabled)
-    setShowSubtitles(!showSubtitles)
-  }, [isSubtitlesEnabled, showSubtitles])
-
-  const toggleTranslation = useCallback(() => {
-    setIsTranslationEnabled(!isTranslationEnabled)
-    setShowTranslation(!showTranslation)
-  }, [isTranslationEnabled, showTranslation])
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-    }
-
-    document.addEventListener("fullscreenchange", handleFullscreenChange)
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange)
-  }, [])
-
-  useEffect(() => {
-    const handlePiPChange = () => {
-      setIsPiPEnabled(!!document.pictureInPictureElement)
-    }
-
-    document.addEventListener("enterpictureinpicture", handlePiPChange)
-    document.addEventListener("leavepictureinpicture", handlePiPChange)
-
-    return () => {
-      document.removeEventListener("enterpictureinpicture", handlePiPChange)
-      document.removeEventListener("leavepictureinpicture", handlePiPChange)
-    }
-  }, [])
+    cleanup()
+    onLeaveRoom()
+  }, [roomId, cleanup, onLeaveRoom])
 
   return (
-    <div ref={containerRef} className="min-h-screen bg-background flex flex-col" onClick={handleUserInteraction}>
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Error notification */}
+      {connectionError && (
+        <div className="absolute top-4 right-4 z-50">
+          <Card className="p-4 bg-destructive/10 border-destructive">
+            <p className="text-sm text-destructive">{connectionError}</p>
+          </Card>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-card border-b border-border p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div>
               <h1 className="text-lg font-semibold">Room: {roomId}</h1>
-              <p className="text-sm text-muted-foreground">Connected as {nickname}</p>
+              <p className="text-sm text-muted-foreground">{nickname}</p>
             </div>
             <Badge
               variant={
@@ -435,289 +476,76 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
                   ? "default"
                   : connectionStatus === "connecting"
                     ? "secondary"
-                    : "destructive"
+                    : connectionStatus === "failed"
+                      ? "destructive"
+                      : "outline"
               }
             >
-              {connectionStatus === "connected" && "Connected"}
-              {connectionStatus === "connecting" && "Connecting..."}
-              {connectionStatus === "disconnected" && "Disconnected"}
+              {connectionStatus}
             </Badge>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowChat(!showChat)}
-              className={showChat ? "bg-accent text-accent-foreground" : ""}
-            >
-              <MessageSquare className="w-4 h-4 mr-2" />
-              Chat
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowFileShare(!showFileShare)}
-              className={showFileShare ? "bg-accent text-accent-foreground" : ""}
-            >
-              <FileUp className="w-4 h-4 mr-2" />
-              Files
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowSubtitles(!showSubtitles)}
-              className={showSubtitles ? "bg-accent text-accent-foreground" : ""}
-            >
-              <Subtitles className="w-4 h-4 mr-2" />
-              Subtitles
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowTranslation(!showTranslation)}
-              className={showTranslation ? "bg-accent text-accent-foreground" : ""}
-            >
-              <Languages className="w-4 h-4 mr-2" />
-              Translation
-            </Button>
           </div>
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 flex relative">
-        {/* Video Area */}
-        <div className="flex-1 p-4">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-full">
-            {/* Remote Video */}
-            <ResizablePanel
-              defaultWidth={640}
-              defaultHeight={480}
-              minWidth={320}
-              minHeight={240}
-              className="video-container relative group"
-            >
-              <div className="relative h-full">
-                {remoteStream ? (
-                  <div className="relative h-full">
-                    <video
-                      ref={remoteVideoRef}
-                      className="video-element"
-                      playsInline
-                      muted={false}
-                      onVolumeChange={(e) => setAudioOutputLevel(e.currentTarget.volume * 100)}
-                    />
-                    {!remoteVideoPlaying && userInteracted && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                        <Button
-                          variant="outline"
-                          size="lg"
-                          onClick={() => playVideo(remoteVideoRef.current, false)}
-                          className="bg-white/90 hover:bg-white"
-                        >
-                          <Play className="w-6 h-6 mr-2" />
-                          Play Video
-                        </Button>
-                      </div>
-                    )}
-                    {!userInteracted && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                        <div className="text-center text-white">
-                          <Play className="w-12 h-12 mx-auto mb-2" />
-                          <p>Click anywhere to enable video playback</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-center h-full bg-muted">
-                    <div className="text-center">
-                      <Video className="w-16 h-16 text-muted-foreground mx-auto mb-2" />
-                      <p className="text-muted-foreground">Waiting for participant...</p>
-                      <Badge variant="secondary" className="mt-2">
-                        {connectionStatus}
-                      </Badge>
-                    </div>
-                  </div>
-                )}
-
-                <VideoControls
-                  isVisible={!!remoteStream}
-                  onFullscreen={toggleFullscreen}
-                  onPictureInPicture={togglePictureInPicture}
-                  isFullscreen={isFullscreen}
-                  isPiPEnabled={isPiPEnabled}
-                  className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity"
-                />
-
-                {remoteStream && (
-                  <div className="absolute bottom-4 left-4 right-4">
-                    <AudioVisualizer stream={remoteStream} isEnabled={true} />
-                  </div>
-                )}
-
-                {(isSubtitlesEnabled || isTranslationEnabled) && remoteStream && (
-                  <div className="absolute bottom-16 left-4 right-4 space-y-2">
-                    {currentTranscript && (
-                      <div className="bg-black/80 text-white p-3 rounded-lg text-center">
-                        <div className="text-sm opacity-75 mb-1">Original:</div>
-                        <div>{currentTranscript}</div>
-                        {currentTranslation && isTranslationEnabled && (
-                          <>
-                            <div className="text-sm opacity-75 mt-2 mb-1">Translation:</div>
-                            <div className="text-accent-foreground">{currentTranslation}</div>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+      {/* Main content */}
+      <div className="flex-1 p-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-full">
+          {/* Remote video */}
+          <Card className="relative overflow-hidden">
+            <video
+              ref={remoteVideoRef}
+              className="w-full h-full object-cover"
+              autoPlay
+              playsInline
+            />
+            {!remoteStream && (
+              <div className="absolute inset-0 flex items-center justify-center bg-muted">
+                <p className="text-muted-foreground">Waiting for participant...</p>
               </div>
-            </ResizablePanel>
+            )}
+          </Card>
 
-            {/* Local Video */}
-            <ResizablePanel
-              defaultWidth={640}
-              defaultHeight={480}
-              minWidth={320}
-              minHeight={240}
-              className="video-container relative group"
-            >
-              <div className="relative h-full">
-                {isVideoEnabled && (localStream || screenStream) ? (
-                  <div className="relative h-full">
-                    <video ref={localVideoRef} className="video-element" muted playsInline />
-                    {!localVideoPlaying && userInteracted && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                        <Button
-                          variant="outline"
-                          size="lg"
-                          onClick={() => playVideo(localVideoRef.current, true)}
-                          className="bg-white/90 hover:bg-white"
-                        >
-                          <Play className="w-6 h-6 mr-2" />
-                          Play Video
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-center h-full bg-muted">
-                    <VideoOff className="w-16 h-16 text-muted-foreground" />
-                  </div>
-                )}
-
-                <div className="absolute top-4 left-4 right-4 flex justify-between opacity-0 group-hover:opacity-100 transition-opacity">
-                  <Badge variant={isVideoEnabled ? "default" : "secondary"}>
-                    {isVideoEnabled ? "Camera On" : "Camera Off"}
-                  </Badge>
-                  {isScreenSharing && (
-                    <Badge variant="default" className="bg-accent text-accent-foreground">
-                      <Monitor className="w-3 h-3 mr-1" />
-                      Screen Sharing
-                    </Badge>
-                  )}
-                </div>
-
-                <div className="absolute bottom-4 left-4 right-4">
-                  <AudioVisualizer stream={localStream} isEnabled={isAudioEnabled} />
-                </div>
+          {/* Local video */}
+          <Card className="relative overflow-hidden">
+            <video
+              ref={localVideoRef}
+              className="w-full h-full object-cover"
+              autoPlay
+              playsInline
+              muted
+            />
+            {!localStream && (
+              <div className="absolute inset-0 flex items-center justify-center bg-muted">
+                <p className="text-muted-foreground">Initializing camera...</p>
               </div>
-            </ResizablePanel>
-          </div>
-
-          {/* Enhanced Control Bar */}
-          <div className="mt-4 flex justify-center">
-            <Card className="p-4">
-              <div className="flex items-center gap-4">
-                <div className="flex flex-col items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={toggleAudio}
-                    className={isAudioEnabled ? "control-button active" : "control-button inactive"}
-                  >
-                    {isAudioEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-                  </Button>
-                  <div className="w-12 h-1 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-accent transition-all duration-100"
-                      style={{ width: `${audioInputLevel}%` }}
-                    />
-                  </div>
-                </div>
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={toggleVideo}
-                  className={isVideoEnabled ? "control-button active" : "control-button inactive"}
-                >
-                  {isVideoEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-                </Button>
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={toggleScreenShare}
-                  className={isScreenSharing ? "control-button active" : "control-button inactive"}
-                >
-                  {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
-                </Button>
-
-                <VolumeControl volume={volume} onVolumeChange={handleVolumeChange} />
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={toggleFullscreen}
-                  className="control-button inactive bg-transparent"
-                >
-                  {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-                </Button>
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={togglePictureInPicture}
-                  disabled={!remoteStream}
-                  className={isPiPEnabled ? "control-button active" : "control-button inactive bg-transparent"}
-                >
-                  <PictureInPicture className="w-5 h-5" />
-                </Button>
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={toggleSubtitles}
-                  className={isSubtitlesEnabled ? "control-button active" : "control-button inactive bg-transparent"}
-                >
-                  <Subtitles className="w-5 h-5" />
-                </Button>
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={toggleTranslation}
-                  className={isTranslationEnabled ? "control-button active" : "control-button inactive bg-transparent"}
-                >
-                  <Languages className="w-5 h-5" />
-                </Button>
-
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={onLeaveRoom}
-                  className="control-button danger bg-transparent"
-                >
-                  <PhoneOff className="w-5 h-5" />
-                </Button>
-              </div>
-            </Card>
-          </div>
+            )}
+          </Card>
         </div>
 
-        {/* Side Panels */}
-        {showChat && (
-          <div className="w-80 border-l border-border">
-            <Chat\
+        {/* Controls */}
+        <div className="mt-4 flex justify-center gap-2">
+          <Button
+            variant={isAudioEnabled ? "default" : "secondary"}
+            onClick={toggleAudio}
+            disabled={!localStream}
+          >
+            {isAudioEnabled ? "Mute" : "Unmute"}
+          </Button>
+          <Button
+            variant={isVideoEnabled ? "default" : "secondary"}
+            onClick={toggleVideo}
+            disabled={!localStream}
+          >
+            {isVideoEnabled ? "Hide Video" : "Show Video"}
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={handleLeaveRoom}
+          >
+            Leave Room
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
