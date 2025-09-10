@@ -1,4 +1,5 @@
 "use client"
+// resizable-panel.tsx
 
 import type React from "react"
 

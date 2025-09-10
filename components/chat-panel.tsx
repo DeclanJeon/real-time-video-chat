@@ -1,4 +1,5 @@
 "use client"
+// chat-panel.tsx
 
 import type React from "react"
 

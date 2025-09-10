@@ -1,4 +1,5 @@
 "use client"
+// video-controls.tsx
 
 import { Button } from "@/components/ui/button"
 import { Maximize, Minimize, PictureInPicture } from "lucide-react"

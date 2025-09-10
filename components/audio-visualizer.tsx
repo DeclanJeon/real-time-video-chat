@@ -1,4 +1,5 @@
 "use client"
+// audio-visualizer.tsx
 
 import { useEffect, useState, useRef, useCallback } from "react"
 

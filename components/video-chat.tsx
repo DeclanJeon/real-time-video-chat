@@ -1,4 +1,5 @@
 "use client"
+// video-chat.tsx
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
@@ -6,28 +7,7 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import io, { Socket } from "socket.io-client"
 import Peer from "simple-peer"
-import {
-  Mic,
-  MicOff,
-  Video,
-  VideoOff,
-  PhoneOff,
-  MessageSquare,
-  FileUp,
-  Subtitles,
-  Languages,
-  Maximize,
-  Minimize,
-  PictureInPicture,
-  Monitor,
-  MonitorOff,
-  Play,
-} from "lucide-react"
-import { AudioVisualizer } from "@/components/audio-visualizer"
-import { VolumeControl } from "@/components/volume-control"
-import { VideoControls } from "@/components/video-controls"
-import { ResizablePanel } from "@/components/resizable-panel"
-import { ChatPanel } from "@/components/chat-panel"
+import { ICE_SERVERS, MEDIA_CONSTRAINTS } from "@/config/mediaConfig"
 
 interface VideoChatProps {
   roomId: string
@@ -40,76 +20,58 @@ interface RoomUser {
   userId: string
   nickname: string
   socketId: string
+  isPolite?: boolean
 }
-
-// ICE servers configuration
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" }
-]
 
 export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatProps) {
   // State management
   const [isVideoEnabled, setIsVideoEnabled] = useState(true)
   const [isAudioEnabled, setIsAudioEnabled] = useState(true)
-  const [isScreenSharing, setIsScreenSharing] = useState(false)
-  const [showChat, setShowChat] = useState(false)
-  const [showFileShare, setShowFileShare] = useState(false)
-  const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(false)
-  const [isTranslationEnabled, setIsTranslationEnabled] = useState(false)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
-  const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
-  const [volume, setVolume] = useState(50)
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  const [isPiPEnabled, setIsPiPEnabled] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected" | "failed">("connecting")
+  // Connection status type and constants
+  type ConnectionStatus = "connecting" | "connected" | "disconnected" | "failed";
+  const CONNECTION_STATUS: Record<ConnectionStatus, ConnectionStatus> = {
+    connecting: "connecting",
+    connected: "connected",
+    disconnected: "disconnected",
+    failed: "failed"
+  } as const;
+
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(CONNECTION_STATUS.connecting);
+
+  // Custom setter with logging and validation
+  const setConnectionStatusWithLogging = (status: ConnectionStatus) => {
+    // Validate status
+    if (!Object.values(CONNECTION_STATUS).includes(status)) {
+      console.warn(`Invalid connection status: ${status}`);
+      return;
+    }
+    
+    console.log(`Connection status changed from ${connectionStatus} to ${status}`);
+    setConnectionStatus(status);
+  };
   const [connectionError, setConnectionError] = useState<string | null>(null)
-  const [audioInputLevel, setAudioInputLevel] = useState(0)
-  const [audioOutputLevel, setAudioOutputLevel] = useState(0)
-  const [showSubtitles, setShowSubtitles] = useState(false)
-  const [showTranslation, setShowTranslation] = useState(false)
-  const [currentTranscript, setCurrentTranscript] = useState("")
-  const [currentTranslation, setCurrentTranslation] = useState("")
-  const [localVideoPlaying, setLocalVideoPlaying] = useState(false)
- const [remoteVideoPlaying, setRemoteVideoPlaying] = useState(false)
-  const [userInteracted, setUserInteracted] = useState(false)
- const [subtitleHistory, setSubtitleHistory] = useState<
-    Array<{
-      text: string
-      translation?: string
-      timestamp: Date
-      speaker: string
-    }>
-  >([])
   
   // Refs
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
   const peerRef = useRef<Peer.Instance | null>(null)
   const socketRef = useRef<Socket | null>(null)
-  const isMountedRef = useRef(true)
-  const abortControllerRef = useRef<AbortController>(new AbortController())
   const localStreamRef = useRef<MediaStream | null>(null)
-  const targetSocketIdRef = useRef<string | null>(null)
-  const mySocketIdRef = useRef<string | undefined>(undefined)
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const iceCandidatesQueue = useRef<RTCIceCandidateInit[]>([])
+  
+  // Perfect Negotiation Pattern을 위한 상태
+  const isPolite = useRef(false)
+  const makingOffer = useRef(false)
+  const ignoreOffer = useRef(false)
+  const isSettingRemoteAnswerPending = useRef(false)
+  const targetSocketIdRef = useRef<string | null>(null)
 
   // Cleanup function
   const cleanup = useCallback(() => {
     console.log("Cleaning up resources...")
     
-    // Clear timeouts
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current)
-    }
-
-    // Destroy peer connection
     if (peerRef.current) {
       try {
         peerRef.current.destroy()
@@ -119,7 +81,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       peerRef.current = null
     }
 
-    // Stop local stream tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         track.stop()
@@ -127,7 +88,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       localStreamRef.current = null
     }
 
-    // Clear video elements
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null
     }
@@ -135,7 +95,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       remoteVideoRef.current.srcObject = null
     }
 
-    // Disconnect socket
     if (socketRef.current) {
       socketRef.current.disconnect()
       socketRef.current = null
@@ -143,31 +102,18 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
     setLocalStream(null)
     setRemoteStream(null)
-    setConnectionStatus("disconnected")
+    setConnectionStatusWithLogging(CONNECTION_STATUS.disconnected)
   }, [])
 
-  // Initialize media stream with error recovery
+  // Initialize media stream
   const initializeMediaStream = useCallback(async (): Promise<MediaStream | null> => {
     try {
-      const constraints: MediaStreamConstraints = {
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30, max: 30 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 48000
-        }
-      }
+      const constraints: MediaStreamConstraints = MEDIA_CONSTRAINTS
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
       localStreamRef.current = stream
       setLocalStream(stream)
       
-      // Set video element
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream
       }
@@ -177,7 +123,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       console.error("Error accessing media devices:", error)
       setConnectionError("Failed to access camera/microphone")
       
-      // Try audio-only fallback
       try {
         const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
         localStreamRef.current = audioStream
@@ -192,38 +137,51 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
     }
   }, [])
 
-  // Create peer connection with proper error handling
+  // Create peer connection
   const createPeerConnection = useCallback((initiator: boolean, targetSocketId: string): Peer.Instance | null => {
     if (!localStreamRef.current) {
       console.error("No local stream available")
       return null
     }
 
+    // 기존 peer가 있고 연결되어 있으면 재사용
+    if (peerRef.current && !peerRef.current.destroyed) {
+      console.log("Reusing existing peer connection")
+      return peerRef.current
+    }
+
     try {
+      console.log(`Creating peer connection as ${initiator ? 'initiator' : 'responder'}, polite: ${isPolite.current}`)
+      
       const peer = new Peer({
         initiator,
         trickle: true,
         stream: localStreamRef.current,
         config: {
           iceServers: ICE_SERVERS,
-          iceCandidatePoolSize: 10
+          iceCandidatePoolSize: 10,
+          bundlePolicy: 'max-bundle',
+          rtcpMuxPolicy: 'require'
         }
       })
 
-      // Handle signaling
       peer.on('signal', (data: Peer.SignalData) => {
         if (!socketRef.current) return
 
         if (data.type === 'offer') {
+          makingOffer.current = true
           socketRef.current.emit('offer', {
             targetSocketId,
-            offer: data
+            offer: data,
+            polite: isPolite.current
           })
+          makingOffer.current = false
         } else if (data.type === 'answer') {
           socketRef.current.emit('answer', {
             targetSocketId,
             answer: data
           })
+          isSettingRemoteAnswerPending.current = false
         } else if (data.type === 'candidate' && data.candidate) {
           socketRef.current.emit('ice-candidate', {
             targetSocketId,
@@ -232,7 +190,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         }
       })
 
-      // Handle incoming stream
       peer.on('stream', (stream: MediaStream) => {
         console.log('Received remote stream')
         setRemoteStream(stream)
@@ -241,10 +198,9 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         }
       })
 
-      // Connection established
       peer.on('connect', () => {
         console.log('Peer connection established')
-        setConnectionStatus("connected")
+        setConnectionStatusWithLogging(CONNECTION_STATUS.connected)
         setConnectionError(null)
         
         // Process queued ICE candidates
@@ -256,23 +212,18 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         }
       })
 
-      // Handle errors
       peer.on('error', (err: Error) => {
         console.error('Peer error:', err)
-        setConnectionError(err.message)
-        setConnectionStatus("failed")
-        
-        // Attempt reconnection
-        reconnectTimeoutRef.current = setTimeout(() => {
-          console.log("Attempting to reconnect...")
-          initializeConnection()
-        }, 3000)
+        // stable state 에러는 무시 (자동 복구됨)
+        if (!err.message?.includes('stable')) {
+          setConnectionError(err.message)
+          setConnectionStatusWithLogging(CONNECTION_STATUS.failed)
+        }
       })
 
-      // Connection closed
       peer.on('close', () => {
         console.log('Peer connection closed')
-        setConnectionStatus("disconnected")
+        setConnectionStatusWithLogging(CONNECTION_STATUS.disconnected)
         setRemoteStream(null)
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = null
@@ -287,44 +238,14 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
     }
   }, [])
 
-  // Initialize connection
-  const initializeConnection = useCallback(() => {
-    if (!socketRef.current) {
-      console.error("Socket not connected")
-      return
-    }
-
-    socketRef.current.emit('get-room-users', roomId, (users: RoomUser[]) => {
-      const otherUsers = users.filter(u => u.socketId !== socketRef.current?.id)
-      
-      if (otherUsers.length === 0) {
-        console.log("Waiting for other user...")
-        return
-      }
-
-      const targetUser = otherUsers[0]
-      
-      // Clean up existing peer if any
-      if (peerRef.current) {
-        peerRef.current.destroy()
-      }
-
-      // Create new peer connection
-      peerRef.current = createPeerConnection(true, targetUser.socketId)
-    })
-  }, [roomId, createPeerConnection])
-
   // Main initialization effect
   useEffect(() => {
-    isMountedRef.current = true
     let mounted = true
 
     const init = async () => {
-      // Get media stream first
       const stream = await initializeMediaStream()
       if (!stream || !mounted) return
 
-      // Connect to signaling server
       const socket = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || 'http://localhost:3001', {
         transports: ['websocket'],
         reconnection: true,
@@ -334,41 +255,77 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
       socketRef.current = socket
 
-      // Socket event handlers
       socket.on('connect', () => {
         console.log('Connected to signaling server')
-        mySocketIdRef.current = socket.id
         socket.emit('join-room', { roomId, userId, nickname })
       })
 
       socket.on('existing-users', (users: RoomUser[]) => {
         console.log('Existing users:', users)
-        if (mounted) {
-          setTimeout(initializeConnection, 500)
+        
+        if (users.length === 0) {
+          // 첫 번째 유저
+          isPolite.current = false
+          console.log("First user in room, waiting for others...")
+        } else {
+          // 두 번째 유저
+          isPolite.current = true
+          const targetUser = users[0]
+          targetSocketIdRef.current = targetUser.socketId
+          
+          // 두 번째 유저가 즉시 offer 생성
+          console.log("Second user, creating offer immediately")
+          peerRef.current = createPeerConnection(true, targetUser.socketId)
         }
       })
 
       socket.on('user-joined', (data: any) => {
         console.log('User joined:', data)
-        if (mounted && !peerRef.current) {
-          setTimeout(initializeConnection, 500)
+        
+        if (!peerRef.current && !isPolite.current) {
+          // 첫 번째 유저는 두 번째 유저가 들어오면 대기
+          targetSocketIdRef.current = data.socketId
+          console.log("First user waiting for offer from second user")
         }
       })
 
-      socket.on('offer', (data: { senderSocketId: string; offer: Peer.SignalData }) => {
+      socket.on('offer', async (data: { senderSocketId: string; offer: Peer.SignalData; polite?: boolean }) => {
         if (!mounted) return
         
         console.log('Received offer')
+        targetSocketIdRef.current = data.senderSocketId
         
-        // Clean up existing peer
-        if (peerRef.current) {
-          peerRef.current.destroy()
+        // offer collision 처리
+        const offerCollision = makingOffer.current || isSettingRemoteAnswerPending.current
+        ignoreOffer.current = isPolite.current && offerCollision
+        
+        if (ignoreOffer.current) {
+          console.log('Ignoring offer due to collision')
+          return
         }
-
-        // Create answer peer
-        peerRef.current = createPeerConnection(false, data.senderSocketId)
+        
+        // impolite peer는 충돌 시 연결 재시작
+        if (!isPolite.current && offerCollision) {
+          console.log('Offer collision detected, restarting...')
+          if (peerRef.current) {
+            peerRef.current.destroy()
+            peerRef.current = null
+          }
+        }
+        
+        // answer 생성
+        if (!peerRef.current || peerRef.current.destroyed) {
+          peerRef.current = createPeerConnection(false, data.senderSocketId)
+        }
+        
         if (peerRef.current) {
-          peerRef.current.signal(data.offer)
+          isSettingRemoteAnswerPending.current = true
+          try {
+            peerRef.current.signal(data.offer)
+          } catch (err) {
+            console.error('Error setting remote description:', err)
+            isSettingRemoteAnswerPending.current = false
+          }
         }
       })
 
@@ -376,16 +333,42 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         if (!mounted || !peerRef.current) return
         
         console.log('Received answer')
-        peerRef.current.signal(data.answer)
+        
+        if (isSettingRemoteAnswerPending.current) {
+          console.log('Already setting remote answer, ignoring')
+          return
+        }
+        
+        try {
+          peerRef.current.signal(data.answer)
+        } catch (err: any) {
+          console.error('Error setting answer:', err)
+          // stable state 에러는 무시
+          if (!err.message?.includes('stable')) {
+            setTimeout(() => {
+              if (peerRef.current) {
+                peerRef.current.destroy()
+                peerRef.current = null
+              }
+              if (targetSocketIdRef.current) {
+                peerRef.current = createPeerConnection(true, targetSocketIdRef.current)
+              }
+            }, 100)
+          }
+        }
       })
 
       socket.on('ice-candidate', (data: { senderSocketId: string; candidate: RTCIceCandidateInit }) => {
         if (!mounted) return
         
-        if (peerRef.current) {
-          peerRef.current.signal({ type: 'candidate', candidate: data.candidate } as any)
+        if (peerRef.current && !peerRef.current.destroyed) {
+          try {
+            peerRef.current.signal({ type: 'candidate', candidate: data.candidate } as any)
+          } catch (err) {
+            console.log('Buffering ICE candidate')
+            iceCandidatesQueue.current.push(data.candidate)
+          }
         } else {
-          // Queue ICE candidates if peer not ready
           iceCandidatesQueue.current.push(data.candidate)
         }
       })
@@ -397,12 +380,13 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
           peerRef.current = null
         }
         setRemoteStream(null)
-        setConnectionStatus("disconnected")
+        setConnectionStatusWithLogging(CONNECTION_STATUS.disconnected)
+        targetSocketIdRef.current = null
       })
 
       socket.on('disconnect', () => {
         console.log('Disconnected from signaling server')
-        setConnectionStatus("disconnected")
+        setConnectionStatusWithLogging(CONNECTION_STATUS.disconnected)
       })
 
       socket.on('reconnect', () => {
@@ -415,10 +399,9 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
 
     return () => {
       mounted = false
-      isMountedRef.current = false
       cleanup()
     }
-  }, [roomId, userId, nickname, initializeMediaStream, createPeerConnection, initializeConnection, cleanup])
+  }, [roomId, userId, nickname, initializeMediaStream, createPeerConnection, cleanup])
 
   // Toggle video
   const toggleVideo = useCallback(() => {
