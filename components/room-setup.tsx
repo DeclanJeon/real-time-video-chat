@@ -190,13 +190,26 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
                 <video
                   ref={(video) => {
                     if (video && localStream) {
-                      video.srcObject = localStream
-                      video.play().catch(console.error)
+                      // Only set srcObject if it's different from current
+                      if (video.srcObject !== localStream) {
+                        video.srcObject = localStream
+                      }
+
+                      // Only attempt to play if video is ready and not already playing
+                      if (video.readyState >= 2 && video.paused) {
+                        video.play().catch((error) => {
+                          // Ignore AbortError as it's expected during stream transitions
+                          if (error.name !== "AbortError") {
+                            console.error("Video play error:", error)
+                          }
+                        })
+                      }
                     }
                   }}
                   className="video-element"
                   muted
                   playsInline
+                  autoPlay
                 />
               ) : (
                 <div className="flex items-center justify-center h-full bg-muted">
