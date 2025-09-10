@@ -1,59 +1,23 @@
 // screen-share.tsx
 "use client"
 
-import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Monitor, MonitorOff, Square } from "lucide-react"
 
 interface ScreenShareProps {
-  onScreenShare: (stream: MediaStream | null) => void
+  onToggleScreenShare: () => void
   isSharing: boolean
 }
 
-export function ScreenShare({ onScreenShare, isSharing }: ScreenShareProps) {
-  const [error, setError] = useState<string | null>(null)
-
-  const startScreenShare = async () => {
-    try {
-      setError(null)
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: "always",
-          displaySurface: "monitor",
-        },
-        audio: true,
-      })
-
-      // 화면 공유가 중단되었을 때 처리
-      stream.getVideoTracks()[0].addEventListener("ended", () => {
-        onScreenShare(null)
-      })
-
-      onScreenShare(stream)
-    } catch (err: any) {
-      console.error("Screen share error:", err)
-      setError("화면 공유를 시작할 수 없습니다.")
-    }
-  }
-
-  const stopScreenShare = () => {
-    onScreenShare(null)
-  }
-
+export function ScreenShare({ onToggleScreenShare, isSharing }: ScreenShareProps) {
   return (
     <div className="p-4">
       <h3 className="font-semibold mb-4">화면 공유</h3>
 
-      {error && (
-        <Card className="p-3 mb-4 bg-destructive/10 border-destructive">
-          <p className="text-sm text-destructive">{error}</p>
-        </Card>
-      )}
-
       <div className="space-y-3">
         <Button
-          onClick={isSharing ? stopScreenShare : startScreenShare}
+          onClick={onToggleScreenShare}
           variant={isSharing ? "destructive" : "default"}
           className="w-full"
         >

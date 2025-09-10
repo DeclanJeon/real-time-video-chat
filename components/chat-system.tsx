@@ -66,7 +66,9 @@ export function ChatSystem({ userId, nickname, onSendMessage, messages }: ChatSy
               >
                 {msg.userId !== userId && <p className="text-xs font-medium mb-1">{msg.nickname}</p>}
                 <p className="text-sm">{msg.content}</p>
-                <p className="text-xs opacity-70 mt-1">{msg.timestamp.toLocaleTimeString()}</p>
+                <p className="text-xs opacity-70 mt-1">
+                  {typeof msg.timestamp === 'string' ? new Date(msg.timestamp).toLocaleTimeString() : msg.timestamp.toLocaleTimeString()}
+                </p>
               </div>
             </div>
           ))}
