@@ -7,8 +7,8 @@ import { useState, useRef, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { Textarea } from "@/components/ui/textarea"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Textarea } from "./ui/textarea"
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover"
 import { Send, Smile, MoreVertical, Copy, Reply, Clock } from "lucide-react"
 
 interface Message {
@@ -41,7 +41,7 @@ export function ChatPanel({ roomId, userId, nickname }: ChatPanelProps) {
   const [editingMessage, setEditingMessage] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const typingTimeoutRef = useRef<NodeJS.Timeout>()
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   // Auto-resize textarea
   const adjustTextareaHeight = useCallback(() => {
@@ -153,7 +153,7 @@ export function ChatPanel({ roomId, userId, nickname }: ChatPanelProps) {
     navigator.clipboard.writeText(content)
   }, [])
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
@@ -425,7 +425,7 @@ export function ChatPanel({ roomId, userId, nickname }: ChatPanelProps) {
               ref={textareaRef}
               placeholder="Type a message... (한글, 中文, English supported)"
               value={newMessage}
-              onChange={(e) => {
+              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                 setNewMessage(e.target.value)
                 handleTyping()
               }}

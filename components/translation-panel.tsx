@@ -170,7 +170,7 @@ export function TranslationPanel({ isActive, onToggle, inputText, onTranslation 
           <Textarea
             placeholder="번역할 텍스트를 입력하세요..."
             value={sourceText}
-            onChange={(e) => setSourceText(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setSourceText(e.target.value)}
             className="min-h-24"
           />
         </div>

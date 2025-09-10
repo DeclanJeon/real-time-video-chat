@@ -299,7 +299,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       // Replace video track in peer connection
       if (peerRef.current && localStreamRef.current) {
         const videoTrack = stream.getVideoTracks()[0]
-        const sender = peerRef.current._pc?.getSenders().find((s) => s.track && s.track.kind === "video")
+        const sender = (peerRef.current as any)._pc?.getSenders().find((s: any) => s.track && s.track.kind === "video")
         if (sender && videoTrack) {
           await sender.replaceTrack(videoTrack)
         }
@@ -309,7 +309,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       // Restore camera
       if (peerRef.current && localStreamRef.current) {
         const videoTrack = localStreamRef.current.getVideoTracks()[0]
-        const sender = peerRef.current._pc?.getSenders().find((s) => s.track && s.track.kind === "video")
+        const sender = (peerRef.current as any)._pc?.getSenders().find((s: any) => s.track && s.track.kind === "video")
         if (sender && videoTrack) {
           await sender.replaceTrack(videoTrack)
         }
@@ -358,7 +358,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       if (type === "video") {
         const videoTrack = newStream.getVideoTracks()[0]
         if (peerRef.current) {
-          const sender = peerRef.current._pc?.getSenders().find((s) => s.track && s.track.kind === "video")
+          const sender = (peerRef.current as any)._pc?.getSenders().find((s: any) => s.track && s.track.kind === "video")
           if (sender) {
             await sender.replaceTrack(videoTrack)
           }
@@ -372,7 +372,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       } else {
         const audioTrack = newStream.getAudioTracks()[0]
         if (peerRef.current) {
-          const sender = peerRef.current._pc?.getSenders().find((s) => s.track && s.track.kind === "audio")
+          const sender = (peerRef.current as any)._pc?.getSenders().find((s: any) => s.track && s.track.kind === "audio")
           if (sender) {
             await sender.replaceTrack(audioTrack)
           }
