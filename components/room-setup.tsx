@@ -15,10 +15,11 @@ import { AudioVisualizer } from "@/components/audio-visualizer"
 interface RoomSetupProps {
   onJoinRoom: (roomId: string, nickname: string) => void
   userId: string
+  initialRoomId?: string
 }
 
-export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
-  const [roomId, setRoomId] = useState("")
+export function RoomSetup({ onJoinRoom, userId, initialRoomId }: RoomSetupProps) {
+  const [roomId, setRoomId] = useState(initialRoomId || "")
   const [nickname, setNickname] = useState("")
   const [isVideoEnabled, setIsVideoEnabled] = useState(true)
   const [isAudioEnabled, setIsAudioEnabled] = useState(true)
@@ -99,6 +100,12 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
       }
     }
   }, [isVideoEnabled, isAudioEnabled, selectedDevices])
+
+  useEffect(() => {
+    if (initialRoomId) {
+      setRoomId(initialRoomId)
+    }
+  }, [initialRoomId])
 
   const generateRoomId = () => {
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -295,8 +302,9 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
                   onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                   className={`text-base ${roomId && !validateRoomId(roomId) ? "border-destructive" : ""}`}
                   maxLength={20}
+                  disabled={!!initialRoomId}
                 />
-                <Button variant="outline" onClick={generateRoomId} size="icon">
+                <Button variant="outline" onClick={generateRoomId} size="icon" disabled={!!initialRoomId}>
                   <Shuffle className="w-4 h-4" />
                 </Button>
                 {roomId && (
@@ -311,6 +319,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
                 </p>
               )}
               {copied && <p className="text-xs text-accent">Room ID copied to clipboard!</p>}
+              {initialRoomId && <p className="text-xs text-muted-foreground">Room ID from URL - cannot be changed</p>}
             </div>
 
             <div className="text-sm text-muted-foreground bg-muted p-3 rounded-lg space-y-2">
