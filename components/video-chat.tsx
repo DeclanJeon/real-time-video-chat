@@ -490,20 +490,6 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       {/* Main content */}
       <div className="flex-1 p-4">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-full">
-          {/* Remote video */}
-          <Card className="relative overflow-hidden">
-            <video
-              ref={remoteVideoRef}
-              className="w-full h-full object-cover"
-              autoPlay
-              playsInline
-            />
-            {!remoteStream && (
-              <div className="absolute inset-0 flex items-center justify-center bg-muted">
-                <p className="text-muted-foreground">Waiting for participant...</p>
-              </div>
-            )}
-          </Card>
 
           {/* Local video */}
           <Card className="relative overflow-hidden">
@@ -517,6 +503,21 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
             {!localStream && (
               <div className="absolute inset-0 flex items-center justify-center bg-muted">
                 <p className="text-muted-foreground">Initializing camera...</p>
+              </div>
+            )}
+          </Card>
+
+          {/* Remote video */}
+          <Card className="relative overflow-hidden">
+            <video
+              ref={remoteVideoRef}
+              className="w-full h-full object-cover"
+              autoPlay
+              playsInline
+            />
+            {!remoteStream && (
+              <div className="absolute inset-0 flex items-center justify-center bg-muted">
+                <p className="text-muted-foreground">Waiting for participant...</p>
               </div>
             )}
           </Card>
