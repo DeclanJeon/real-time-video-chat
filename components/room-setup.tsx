@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -10,17 +10,17 @@ import { Badge } from "@/components/ui/badge"
 import { Mic, MicOff, Video, VideoOff, Shuffle, Copy, Check, AlertCircle, Loader2 } from "lucide-react"
 import { DeviceSelector } from "@/components/device-selector"
 import { AudioVisualizer } from "@/components/audio-visualizer"
+import { generateRoomId, validateNickname, validateRoomId, generateUserId } from "@/lib/utils" // generateUserId 임포트
+import { MEDIA_DEVICE_CONSTRAINTS } from "@/store/mediaConfig"
+import { useUserStore } from "@/store/userConfig" // useUserStore import
 
 interface RoomSetupProps {
   onJoinRoom: (roomId: string, nickname: string) => void
-  userId: string
+  // userId: string // userId props 제거
 }
 
-export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
+export function RoomSetup({ onJoinRoom }: RoomSetupProps) { // userId props 제거
   const [roomId, setRoomId] = useState("")
-  const [nickname, setNickname] = useState("")
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true)
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [mediaError, setMediaError] = useState<string | null>(null)
@@ -29,11 +29,25 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
     microphone: PermissionState | null
   }>({ camera: null, microphone: null })
   const [copied, setCopied] = useState(false)
-  const [selectedDevices, setSelectedDevices] = useState<{
-    camera: string
-    microphone: string
-    speaker: string
-  }>({ camera: "", microphone: "", speaker: "" })
+
+  // Zustand store에서 상태와 액션을 가져옵니다.
+  const {
+    nickname,
+    setNickname,
+    isVideoEnabled,
+    setIsVideoEnabled,
+    isAudioEnabled,
+    setIsAudioEnabled,
+    selectedDevices,
+    setSelectedDevices,
+    setUserId, // userId도 Zustand store에서 관리
+    id: userId, // userId를 Zustand store에서 가져옵니다.
+  } = useUserStore()
+
+  useEffect(() => {
+    // userId를 Zustand store에 설정 (초기 렌더링 시 한 번만)
+    setUserId(generateUserId())
+  }, [setUserId]) // setUserId만 의존성 배열에 포함
 
   useEffect(() => {
     const initializeMedia = async () => {
@@ -51,23 +65,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
         })
 
         // Get media stream with selected devices
-        const constraints: MediaStreamConstraints = {
-          video: isVideoEnabled
-            ? {
-                deviceId: selectedDevices.camera ? { exact: selectedDevices.camera } : undefined,
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-              }
-            : false,
-          audio: isAudioEnabled
-            ? {
-                deviceId: selectedDevices.microphone ? { exact: selectedDevices.microphone } : undefined,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-              }
-            : false,
-        }
+        const constraints: MediaStreamConstraints = MEDIA_DEVICE_CONSTRAINTS(isVideoEnabled, isAudioEnabled, selectedDevices)
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints)
         setLocalStream(stream)
@@ -97,15 +95,10 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
         localStream.getTracks().forEach((track) => track.stop())
       }
     }
-  }, [isVideoEnabled, isAudioEnabled, selectedDevices])
+  }, [isVideoEnabled, isAudioEnabled, selectedDevices, setIsAudioEnabled, setIsVideoEnabled]) // 의존성 배열에 추가된 Zustand setter 함수
 
-  const generateRoomId = () => {
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    let result = ""
-    for (let i = 0; i < 8; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length))
-    }
-    setRoomId(result)
+  const setGenerateRoomId = () => {
+    setRoomId(generateRoomId())
   }
 
   const copyRoomId = async () => {
@@ -120,18 +113,6 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
     }
   }
 
-  const validateNickname = (value: string) => {
-    // Allow Unicode characters, letters, numbers, spaces, and common punctuation
-    const unicodeRegex = /^[\p{L}\p{N}\p{Z}\p{P}]{1,30}$/u
-    return unicodeRegex.test(value.trim())
-  }
-
-  const validateRoomId = (value: string) => {
-    // Room ID should be alphanumeric, 4-20 characters
-    const roomRegex = /^[A-Za-z0-9]{4,20}$/
-    return roomRegex.test(value.trim())
-  }
-
   const handleJoin = () => {
     if (roomId.trim() && nickname.trim() && validateNickname(nickname) && validateRoomId(roomId)) {
       onJoinRoom(roomId.trim().toUpperCase(), nickname.trim())
@@ -139,7 +120,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
   }
 
   const toggleVideo = () => {
-    setIsVideoEnabled(!isVideoEnabled)
+    setIsVideoEnabled(!isVideoEnabled) // Zustand store 업데이트
     if (localStream) {
       const videoTrack = localStream.getVideoTracks()[0]
       if (videoTrack) {
@@ -149,7 +130,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
   }
 
   const toggleAudio = () => {
-    setIsAudioEnabled(!isAudioEnabled)
+    setIsAudioEnabled(!isAudioEnabled) // Zustand store 업데이트
     if (localStream) {
       const audioTrack = localStream.getAudioTracks()[0]
       if (audioTrack) {
@@ -157,6 +138,10 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
       }
     }
   }
+
+  const handleDeviceChange = useCallback((devices: { camera: string; microphone: string; speaker: string }) => {
+    setSelectedDevices(devices) // Zustand store 업데이트
+  }, [setSelectedDevices]) // setSelectedDevices는 stable한 참조이므로 의존성 배열에 추가해도 문제 없음
 
   const isFormValid = roomId.trim() && nickname.trim() && validateNickname(nickname) && validateRoomId(roomId)
 
@@ -243,7 +228,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
               </div>
             </div>
 
-            <DeviceSelector onDeviceChange={setSelectedDevices} />
+            <DeviceSelector onDeviceChange={handleDeviceChange} />
           </CardContent>
         </Card>
 
@@ -260,7 +245,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
                 id="nickname"
                 placeholder="Enter your nickname (한글, 中文, English supported)"
                 value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
+                onChange={(e) => setNickname(e.target.value)} // Zustand store 업데이트
                 className={`text-base ${nickname && !validateNickname(nickname) ? "border-destructive" : ""}`}
                 maxLength={30}
               />
@@ -282,7 +267,7 @@ export function RoomSetup({ onJoinRoom, userId }: RoomSetupProps) {
                   className={`text-base ${roomId && !validateRoomId(roomId) ? "border-destructive" : ""}`}
                   maxLength={20}
                 />
-                <Button variant="outline" onClick={generateRoomId} size="icon">
+                <Button variant="outline" onClick={setGenerateRoomId} size="icon">
                   <Shuffle className="w-4 h-4" />
                 </Button>
                 {roomId && (

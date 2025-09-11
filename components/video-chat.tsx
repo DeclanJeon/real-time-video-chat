@@ -6,28 +6,9 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import io, { Socket } from "socket.io-client"
 import Peer from "simple-peer"
-import {
-  Mic,
-  MicOff,
-  Video,
-  VideoOff,
-  PhoneOff,
-  MessageSquare,
-  FileUp,
-  Subtitles,
-  Languages,
-  Maximize,
-  Minimize,
-  PictureInPicture,
-  Monitor,
-  MonitorOff,
-  Play,
-} from "lucide-react"
-import { AudioVisualizer } from "@/components/audio-visualizer"
-import { VolumeControl } from "@/components/volume-control"
-import { VideoControls } from "@/components/video-controls"
-import { ResizablePanel } from "@/components/resizable-panel"
-import { ChatPanel } from "@/components/chat-panel"
+import { ICE_SERVERS, MEDIA_STREAM_CONSTRAINTS } from "@/store/mediaConfig"
+import { useUserStore } from "@/store/userConfig" // useUserStore 임포트
+import { usePeerStore, PeerInfo } from "@/store/peerStore" // usePeerStore 임포트
 
 interface VideoChatProps {
   roomId: string
@@ -42,49 +23,28 @@ interface RoomUser {
   socketId: string
 }
 
-// ICE servers configuration
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" }
-]
-
 export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatProps) {
-  // State management
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true)
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true)
-  const [isScreenSharing, setIsScreenSharing] = useState(false)
-  const [showChat, setShowChat] = useState(false)
-  const [showFileShare, setShowFileShare] = useState(false)
-  const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(false)
-  const [isTranslationEnabled, setIsTranslationEnabled] = useState(false)
+  // Zustand store에서 상태 및 액션 가져오기
+  const {
+    id: currentUserId,
+    nickname: currentNickname,
+    socketId: currentSocketId,
+    isVideoEnabled,
+    isAudioEnabled,
+    selectedDevices,
+    setUserId,
+    setNickname,
+    setSocketId,
+    setIsVideoEnabled,
+    setIsAudioEnabled,
+  } = useUserStore()
+
+  const { remotePeer, setRemotePeer, updateRemotePeer } = usePeerStore()
+
+  // Local state management
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
-  const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
-  const [volume, setVolume] = useState(50)
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  const [isPiPEnabled, setIsPiPEnabled] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected" | "failed">("connecting")
   const [connectionError, setConnectionError] = useState<string | null>(null)
-  const [audioInputLevel, setAudioInputLevel] = useState(0)
-  const [audioOutputLevel, setAudioOutputLevel] = useState(0)
-  const [showSubtitles, setShowSubtitles] = useState(false)
-  const [showTranslation, setShowTranslation] = useState(false)
-  const [currentTranscript, setCurrentTranscript] = useState("")
-  const [currentTranslation, setCurrentTranslation] = useState("")
-  const [localVideoPlaying, setLocalVideoPlaying] = useState(false)
- const [remoteVideoPlaying, setRemoteVideoPlaying] = useState(false)
-  const [userInteracted, setUserInteracted] = useState(false)
- const [subtitleHistory, setSubtitleHistory] = useState<
-    Array<{
-      text: string
-      translation?: string
-      timestamp: Date
-      speaker: string
-    }>
-  >([])
   
   // Refs
   const localVideoRef = useRef<HTMLVideoElement>(null)
@@ -96,9 +56,14 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
   const abortControllerRef = useRef<AbortController>(new AbortController())
   const localStreamRef = useRef<MediaStream | null>(null)
   const targetSocketIdRef = useRef<string | null>(null)
-  const mySocketIdRef = useRef<string | undefined>(undefined)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const iceCandidatesQueue = useRef<RTCIceCandidateInit[]>([])
+
+  // Initialize user ID and nickname in Zustand store
+  useEffect(() => {
+    setUserId(userId)
+    setNickname(nickname)
+  }, [userId, nickname, setUserId, setNickname])
 
   // Cleanup function
   const cleanup = useCallback(() => {
@@ -142,26 +107,14 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
     }
 
     setLocalStream(null)
-    setRemoteStream(null)
+    updateRemotePeer({ stream: null, peerConnection: null }) // remoteStream 대신 peerStore 업데이트
     setConnectionStatus("disconnected")
   }, [])
 
   // Initialize media stream with error recovery
   const initializeMediaStream = useCallback(async (): Promise<MediaStream | null> => {
     try {
-      const constraints: MediaStreamConstraints = {
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30, max: 30 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 48000
-        }
-      }
+      const constraints: MediaStreamConstraints = MEDIA_STREAM_CONSTRAINTS
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
       localStreamRef.current = stream
@@ -235,7 +188,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       // Handle incoming stream
       peer.on('stream', (stream: MediaStream) => {
         console.log('Received remote stream')
-        setRemoteStream(stream)
+        updateRemotePeer({ stream }) // Zustand store 업데이트
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = stream
         }
@@ -273,7 +226,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       peer.on('close', () => {
         console.log('Peer connection closed')
         setConnectionStatus("disconnected")
-        setRemoteStream(null)
+        updateRemotePeer({ stream: null, peerConnection: null }) // Zustand store 업데이트
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = null
         }
@@ -325,7 +278,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       if (!stream || !mounted) return
 
       // Connect to signaling server
-      const socket = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || 'http://localhost:3001', {
+      const socket = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || 'http://localhost:5500', {
         transports: ['websocket'],
         reconnection: true,
         reconnectionAttempts: 5,
@@ -337,8 +290,19 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       // Socket event handlers
       socket.on('connect', () => {
         console.log('Connected to signaling server')
-        mySocketIdRef.current = socket.id
-        socket.emit('join-room', { roomId, userId, nickname })
+        setSocketId(socket.id!) // non-null assertion operator 사용
+        socket.emit('join-room', {
+          roomId,
+          userId: currentUserId,
+          nickname: currentNickname,
+          isVideoEnabled,
+          isAudioEnabled,
+          selectedDevices,
+        })
+      })
+
+      socket.on('your-socket-id', (socketId: string) => {
+        setSocketId(socketId)
       })
 
       socket.on('existing-users', (users: RoomUser[]) => {
@@ -348,10 +312,21 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         }
       })
 
-      socket.on('user-joined', (data: any) => {
-        console.log('User joined:', data)
-        if (mounted && !peerRef.current) {
-          setTimeout(initializeConnection, 500)
+      socket.on('new-user-joined', (peerData: PeerInfo) => { // 'user-joined' 대신 'new-user-joined' 이벤트 처리
+        console.log('New user joined:', peerData)
+        if (mounted) {
+          setRemotePeer({
+            id: peerData.id,
+            nickname: peerData.nickname,
+            socketId: peerData.socketId,
+            isVideoEnabled: peerData.isVideoEnabled,
+            isAudioEnabled: peerData.isAudioEnabled,
+            stream: null, // 초기에는 스트림 없음
+            peerConnection: null, // 초기에는 PeerConnection 없음
+          })
+          if (!peerRef.current) { // 피어 연결이 없는 경우에만 초기화 시도
+            setTimeout(initializeConnection, 500)
+          }
         }
       })
 
@@ -390,14 +365,16 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
         }
       })
 
-      socket.on('user-left', (data: any) => {
+      socket.on('user-left', (data: { socketId: string }) => {
         console.log('User left:', data)
-        if (peerRef.current) {
-          peerRef.current.destroy()
-          peerRef.current = null
+        if (remotePeer && remotePeer.socketId === data.socketId) {
+          if (peerRef.current) {
+            peerRef.current.destroy()
+            peerRef.current = null
+          }
+          setRemotePeer(null) // remotePeer 상태 초기화
+          setConnectionStatus("disconnected")
         }
-        setRemoteStream(null)
-        setConnectionStatus("disconnected")
       })
 
       socket.on('disconnect', () => {
@@ -418,7 +395,23 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       isMountedRef.current = false
       cleanup()
     }
-  }, [roomId, userId, nickname, initializeMediaStream, createPeerConnection, initializeConnection, cleanup])
+  }, [
+    roomId,
+    currentUserId,
+    currentNickname,
+    isVideoEnabled,
+    isAudioEnabled,
+    selectedDevices,
+    setSocketId,
+    setIsVideoEnabled,
+    setIsAudioEnabled,
+    setRemotePeer,
+    initializeMediaStream,
+    createPeerConnection,
+    initializeConnection,
+    cleanup,
+    // localStream, // localStream은 의존성 배열에서 제거
+  ])
 
   // Toggle video
   const toggleVideo = useCallback(() => {
@@ -426,10 +419,10 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       const videoTrack = localStream.getVideoTracks()[0]
       if (videoTrack) {
         videoTrack.enabled = !isVideoEnabled
-        setIsVideoEnabled(!isVideoEnabled)
+        setIsVideoEnabled(!isVideoEnabled) // Zustand store 업데이트
       }
     }
-  }, [localStream, isVideoEnabled])
+  }, [localStream, isVideoEnabled, setIsVideoEnabled])
 
   // Toggle audio
   const toggleAudio = useCallback(() => {
@@ -437,10 +430,10 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
       const audioTrack = localStream.getAudioTracks()[0]
       if (audioTrack) {
         audioTrack.enabled = !isAudioEnabled
-        setIsAudioEnabled(!isAudioEnabled)
+        setIsAudioEnabled(!isAudioEnabled) // Zustand store 업데이트
       }
     }
-  }, [localStream, isAudioEnabled])
+  }, [localStream, isAudioEnabled, setIsAudioEnabled])
 
   // Leave room
   const handleLeaveRoom = useCallback(() => {
@@ -468,7 +461,7 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
           <div className="flex items-center gap-4">
             <div>
               <h1 className="text-lg font-semibold">Room: {roomId}</h1>
-              <p className="text-sm text-muted-foreground">{nickname}</p>
+              <p className="text-sm text-muted-foreground">{currentNickname}</p>
             </div>
             <Badge
               variant={
@@ -510,12 +503,18 @@ export function VideoChat({ roomId, userId, nickname, onLeaveRoom }: VideoChatPr
           {/* Remote video */}
           <Card className="relative overflow-hidden">
             <video
-              ref={remoteVideoRef}
+              ref={(video) => {
+                if (video && remotePeer?.stream) {
+                  video.srcObject = remotePeer.stream
+                  video.play().catch(console.error)
+                }
+                remoteVideoRef.current = video
+              }}
               className="w-full h-full object-cover"
               autoPlay
               playsInline
             />
-            {!remoteStream && (
+            {!remotePeer?.stream && ( // remotePeer의 stream 유무로 판단
               <div className="absolute inset-0 flex items-center justify-center bg-muted">
                 <p className="text-muted-foreground">Waiting for participant...</p>
               </div>
