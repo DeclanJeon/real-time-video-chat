@@ -19,7 +19,8 @@ interface RoomSetupProps {
   // userId: string // userId props 제거
 }
 
-export function RoomSetup({ onJoinRoom }: RoomSetupProps) { // userId props 제거
+export function RoomSetup({ onJoinRoom }: RoomSetupProps) {
+  // userId props 제거
   const [roomId, setRoomId] = useState("")
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -65,7 +66,11 @@ export function RoomSetup({ onJoinRoom }: RoomSetupProps) { // userId props 제�
         })
 
         // Get media stream with selected devices
-        const constraints: MediaStreamConstraints = MEDIA_DEVICE_CONSTRAINTS(isVideoEnabled, isAudioEnabled, selectedDevices)
+        const constraints: MediaStreamConstraints = MEDIA_DEVICE_CONSTRAINTS(
+          isVideoEnabled,
+          isAudioEnabled,
+          selectedDevices,
+        )
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints)
         setLocalStream(stream)
@@ -139,9 +144,12 @@ export function RoomSetup({ onJoinRoom }: RoomSetupProps) { // userId props 제�
     }
   }
 
-  const handleDeviceChange = useCallback((devices: { camera: string; microphone: string; speaker: string }) => {
-    setSelectedDevices(devices) // Zustand store 업데이트
-  }, [setSelectedDevices]) // setSelectedDevices는 stable한 참조이므로 의존성 배열에 추가해도 문제 없음
+  const handleDeviceChange = useCallback(
+    (devices: { camera: string; microphone: string; speaker: string }) => {
+      setSelectedDevices(devices) // Zustand store 업데이트
+    },
+    [setSelectedDevices],
+  ) // setSelectedDevices는 stable한 참조이므로 의존성 배열에 추가해도 문제 없음
 
   const isFormValid = roomId.trim() && nickname.trim() && validateNickname(nickname) && validateRoomId(roomId)
 
@@ -174,8 +182,16 @@ export function RoomSetup({ onJoinRoom }: RoomSetupProps) { // userId props 제�
                 <video
                   ref={(video) => {
                     if (video && localStream) {
-                      video.srcObject = localStream
-                      video.play().catch(console.error)
+                      if (video.srcObject !== localStream) {
+                        video.srcObject = localStream
+                      }
+                      if (video.readyState >= 2 && video.paused) {
+                        video.play().catch((error) => {
+                          if (error.name !== "AbortError") {
+                            console.error("Video play error:", error)
+                          }
+                        })
+                      }
                     }
                   }}
                   className="video-element"

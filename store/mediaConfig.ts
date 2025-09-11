@@ -45,4 +45,3 @@ export const MEDIA_DEVICE_CONSTRAINTS = (
       : false
     }
 }
-  
